@@ -9,12 +9,12 @@ export default function ContatoPage() {
 
         <div className="grid sm:grid-cols-2 gap-4">
           <a
-            href="mailto:contato@josephmatthos.com"
+            href="mailto:emerson.matthos073@gmail.com"
             className="block bg-[#151b23] border border-line rounded-2xl p-6 hover:border-gold transition"
           >
             <div className="text-2xl mb-2">✉️</div>
             <div className="font-bold mb-1">E-mail</div>
-            <div className="text-muted text-sm">contato@josephmatthos.com</div>
+            <div className="text-muted text-sm">emerson.matthos073@gmail.com</div>
           </a>
 
           <a
@@ -30,7 +30,7 @@ export default function ContatoPage() {
         </div>
 
         <div className="mt-10 text-sm text-muted">
-          Para consultas sobre licenciamento comercial, informe: faixa, tipo de uso
+          Para consultas sobre tudo o que se refere a plataforma de música de Joseph Matthos, informe: faixa, tipo de uso
           pretendido, território, prazo e orçamento estimado.
         </div>
       </div>
