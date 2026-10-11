@@ -11,13 +11,10 @@ import {
   SubscriptionStatus,
   TrackStatus,
 } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EntitlementService } from '../entitlement/entitlement.service';
 
-/**
- * Fallback de preços por duração.
- * Fonte de verdade = RentalProduct no banco.
- * Este map só é usado se o RentalProduct não existir (ex: seed antigo).
- */
 const FALLBACK_ALBUM_PRICES: Record<number, number> = {
   24: 1290,
   48: 1990,
@@ -31,11 +28,14 @@ const FALLBACK_ALBUM_PRICES: Record<number, number> = {
 export class RentalService {
   private readonly logger = new Logger(RentalService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly entitlement: EntitlementService,
+  ) {}
 
-  // ----------------------------------------------------------
+  // ============================================================
   // PRODUTOS
-  // ----------------------------------------------------------
+  // ============================================================
   async listTrackRentalProducts(trackId: string) {
     const track = await this.prisma.track.findUnique({
       where: { id: trackId },
@@ -86,9 +86,9 @@ export class RentalService {
     }));
   }
 
-  // ----------------------------------------------------------
-  // HELPERS DE VALIDAÇÃO
-  // ----------------------------------------------------------
+  // ============================================================
+  // VALIDAÇÕES
+  // ============================================================
   private async hasActiveSubscription(userId: string): Promise<boolean> {
     const sub = await this.prisma.subscription.findFirst({
       where: {
@@ -158,9 +158,9 @@ export class RentalService {
     }
   }
 
-  // ----------------------------------------------------------
-  // CRIAR PEDIDO DE FAIXA
-  // ----------------------------------------------------------
+  // ============================================================
+  // PEDIDO — FAIXA
+  // ============================================================
   async createTrackRentalOrder(
     userId: string,
     productId: string,
@@ -171,6 +171,7 @@ export class RentalService {
         where: { idempotencyKey },
         select: {
           id: true,
+          userId: true,
           status: true,
           totalCents: true,
           currency: true,
@@ -186,6 +187,12 @@ export class RentalService {
       });
 
       if (existing) {
+        const sameUser = existing.userId === userId;
+        const sameProduct = existing.items[0]?.productId === productId;
+        if (!sameUser || !sameProduct) {
+          throw new BadRequestException('Requisição inválida.');
+        }
+
         const product = existing.items[0]?.productId
           ? await this.prisma.rentalProduct.findUnique({
               where: { id: existing.items[0].productId },
@@ -243,54 +250,101 @@ export class RentalService {
     await this.assertCanRentTrack(userId, product.trackId);
 
     const finalKey =
-      idempotencyKey ?? `rental-track-${userId}-${productId}-${Date.now()}`;
+      idempotencyKey ??
+      `rental-track-${userId}-${productId}-${randomUUID()}`;
 
-    const order = await this.prisma.order.create({
-      data: {
-        userId,
-        status: OrderStatus.PENDING,
-        totalCents: product.priceCents,
-        currency: product.currency,
-        idempotencyKey: finalKey,
-        items: {
-          create: [
-            {
-              productType: ProductType.RENTAL,
-              productId: product.id,
-              quantity: 1,
-              unitPriceCents: product.priceCents,
-            },
-          ],
+    try {
+      const order = await this.prisma.order.create({
+        data: {
+          userId,
+          status: OrderStatus.PENDING,
+          totalCents: product.priceCents,
+          currency: product.currency,
+          idempotencyKey: finalKey,
+          items: {
+            create: [
+              {
+                productType: ProductType.RENTAL,
+                productId: product.id,
+                quantity: 1,
+                unitPriceCents: product.priceCents,
+              },
+            ],
+          },
         },
-      },
-      select: {
-        id: true,
-        status: true,
-        totalCents: true,
-        currency: true,
-        createdAt: true,
-      },
-    });
+        select: {
+          id: true,
+          status: true,
+          totalCents: true,
+          currency: true,
+          createdAt: true,
+        },
+      });
 
-    return {
-      order,
-      product: {
-        id: product.id,
-        name: product.name,
-        durationHours: product.durationHours,
-        priceCents: product.priceCents,
-      },
-      track: {
-        id: product.track.id,
-        title: product.track.title,
-      },
-      idempotent: false,
-    };
+      return {
+        order,
+        product: {
+          id: product.id,
+          name: product.name,
+          durationHours: product.durationHours,
+          priceCents: product.priceCents,
+        },
+        track: {
+          id: product.track.id,
+          title: product.track.title,
+        },
+        idempotent: false,
+      };
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        const raced = await this.prisma.order.findUnique({
+          where: { idempotencyKey: finalKey },
+          select: {
+            id: true,
+            userId: true,
+            status: true,
+            totalCents: true,
+            currency: true,
+            createdAt: true,
+            items: { select: { productId: true } },
+          },
+        });
+
+        if (
+          raced &&
+          raced.userId === userId &&
+          raced.items[0]?.productId === productId
+        ) {
+          return {
+            order: {
+              id: raced.id,
+              status: raced.status,
+              totalCents: raced.totalCents,
+              currency: raced.currency,
+              createdAt: raced.createdAt,
+            },
+            product: {
+              id: product.id,
+              name: product.name,
+              durationHours: product.durationHours,
+              priceCents: product.priceCents,
+            },
+            track: {
+              id: product.track.id,
+              title: product.track.title,
+            },
+            idempotent: true,
+          };
+        }
+        throw new BadRequestException('Requisição inválida.');
+      }
+      throw err;
+    }
   }
 
-  // ----------------------------------------------------------
-  // CRIAR PEDIDO DE ÁLBUM
-  // ----------------------------------------------------------
+  // ============================================================
+  // PEDIDO — ÁLBUM
+  // ============================================================
   async createAlbumRentalOrder(
     userId: string,
     albumId: string,
@@ -302,14 +356,33 @@ export class RentalService {
         where: { idempotencyKey },
         select: {
           id: true,
+          userId: true,
           status: true,
           totalCents: true,
           currency: true,
           createdAt: true,
+          items: {
+            select: { productId: true, productType: true },
+          },
         },
       });
 
       if (existing) {
+        const product = existing.items[0]?.productId
+          ? await this.prisma.rentalProduct.findUnique({
+              where: { id: existing.items[0].productId },
+              select: { id: true, albumId: true, durationHours: true },
+            })
+          : null;
+
+        const sameUser = existing.userId === userId;
+        const sameAlbum = product?.albumId === albumId;
+        const sameDuration = product?.durationHours === durationHours;
+
+        if (!sameUser || !sameAlbum || !sameDuration) {
+          throw new BadRequestException('Requisição inválida.');
+        }
+
         const album = await this.prisma.album.findUnique({
           where: { id: albumId },
           select: {
@@ -360,83 +433,108 @@ export class RentalService {
       throw new BadRequestException('Álbum sem faixas publicadas');
     }
 
-    // Busca o RentalProduct (produto do álbum)
-    let product = await this.prisma.rentalProduct.findFirst({
+    const product = await this.prisma.rentalProduct.findFirst({
       where: { albumId, durationHours, active: true },
       select: { id: true, priceCents: true, currency: true },
     });
 
-    // Fallback: se não existir produto, cria um com preço hardcoded
     if (!product) {
-      const fallbackPrice = FALLBACK_ALBUM_PRICES[durationHours];
-      if (!fallbackPrice) {
+      if (!FALLBACK_ALBUM_PRICES[durationHours]) {
         throw new BadRequestException('Duração inválida');
       }
-
-      product = await this.prisma.rentalProduct.create({
-        data: {
-          albumId,
-          name: this.humanDuration(durationHours),
-          durationHours,
-          priceCents: fallbackPrice,
-          currency: 'BRL',
-          active: true,
-          sortOrder: this.sortOrderForHours(durationHours),
-        },
-        select: { id: true, priceCents: true, currency: true },
-      });
+      throw new BadRequestException(
+        'Produto de aluguel não configurado para esta duração. Contate o suporte.',
+      );
     }
 
     await this.assertCanRentAlbum(userId, albumId);
 
     const finalKey =
       idempotencyKey ??
-      `rental-album-${userId}-${albumId}-${durationHours}-${Date.now()}`;
+      `rental-album-${userId}-${albumId}-${durationHours}-${randomUUID()}`;
 
-    // 1 OrderItem apontando pro RentalProduct (não pra Track)
-    const order = await this.prisma.order.create({
-      data: {
-        userId,
-        status: OrderStatus.PENDING,
-        totalCents: product.priceCents,
-        currency: product.currency,
-        idempotencyKey: finalKey,
-        items: {
-          create: [
-            {
-              productType: ProductType.RENTAL,
-              productId: product.id,
-              quantity: 1,
-              unitPriceCents: product.priceCents,
-            },
-          ],
+    try {
+      const order = await this.prisma.order.create({
+        data: {
+          userId,
+          status: OrderStatus.PENDING,
+          totalCents: product.priceCents,
+          currency: product.currency,
+          idempotencyKey: finalKey,
+          items: {
+            create: [
+              {
+                productType: ProductType.RENTAL,
+                productId: product.id,
+                quantity: 1,
+                unitPriceCents: product.priceCents,
+              },
+            ],
+          },
         },
-      },
-      select: {
-        id: true,
-        status: true,
-        totalCents: true,
-        currency: true,
-        createdAt: true,
-      },
-    });
+        select: {
+          id: true,
+          status: true,
+          totalCents: true,
+          currency: true,
+          createdAt: true,
+        },
+      });
 
-    return {
-      order,
-      album: {
-        id: album.id,
-        title: album.title,
-        trackCount: album.tracks.length,
-        durationHours,
-        priceCents: product.priceCents,
-      },
-      idempotent: false,
-    };
+      return {
+        order,
+        album: {
+          id: album.id,
+          title: album.title,
+          trackCount: album.tracks.length,
+          durationHours,
+          priceCents: product.priceCents,
+        },
+        idempotent: false,
+      };
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        const raced = await this.prisma.order.findUnique({
+          where: { idempotencyKey: finalKey },
+          select: {
+            id: true,
+            userId: true,
+            status: true,
+            totalCents: true,
+            currency: true,
+            createdAt: true,
+            items: { select: { productId: true } },
+          },
+        });
+
+        if (raced && raced.userId === userId) {
+          return {
+            order: {
+              id: raced.id,
+              status: raced.status,
+              totalCents: raced.totalCents,
+              currency: raced.currency,
+              createdAt: raced.createdAt,
+            },
+            album: {
+              id: album.id,
+              title: album.title,
+              trackCount: album.tracks.length,
+              durationHours,
+              priceCents: raced.totalCents,
+            },
+            idempotent: true,
+          };
+        }
+        throw new BadRequestException('Requisição inválida.');
+      }
+      throw err;
+    }
   }
 
-  // ----------------------------------------------------------
+  // ============================================================
   // MOCK PAY
-  // ----------------------------------------------------------
+  // ============================================================
   async mockPayTrack(userId: string, orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -464,6 +562,11 @@ export class RentalService {
     if (!product || !product.trackId) {
       throw new NotFoundException('Produto de faixa não encontrado');
     }
+    if (order.totalCents !== product.priceCents) {
+      throw new BadRequestException(
+        'Preço do produto diverge do pedido. Refaça o pedido.',
+      );
+    }
 
     const startsAt = new Date();
     const expiresAt = new Date(
@@ -476,7 +579,7 @@ export class RentalService {
         data: {
           status: OrderStatus.PAID,
           paidAt: new Date(),
-          externalPaymentId: `mock-${Date.now()}`,
+          externalPaymentId: `mock-${randomUUID()}`,
         },
       });
 
@@ -496,6 +599,7 @@ export class RentalService {
       return { updatedOrder, rental };
     });
 
+    await this.entitlement.invalidateUser(userId);
     return result;
   }
 
@@ -523,6 +627,11 @@ export class RentalService {
     if (!product || !product.albumId) {
       throw new NotFoundException('Produto de álbum não encontrado');
     }
+    if (order.totalCents !== product.priceCents) {
+      throw new BadRequestException(
+        'Preço do produto diverge do pedido. Refaça o pedido.',
+      );
+    }
 
     const albumTracks = await this.prisma.track.findMany({
       where: { albumId: product.albumId, status: TrackStatus.PUBLISHED },
@@ -544,7 +653,7 @@ export class RentalService {
         data: {
           status: OrderStatus.PAID,
           paidAt: new Date(),
-          externalPaymentId: `mock-album-${Date.now()}`,
+          externalPaymentId: `mock-album-${randomUUID()}`,
         },
       });
 
@@ -568,6 +677,8 @@ export class RentalService {
       return { updatedOrder, rentals };
     });
 
+    await this.entitlement.invalidateUser(userId);
+
     return {
       order: {
         id: result.updatedOrder.id,
@@ -580,9 +691,9 @@ export class RentalService {
     };
   }
 
-  // ----------------------------------------------------------
-  // MINHA LISTA
-  // ----------------------------------------------------------
+  // ============================================================
+  // LISTAGEM
+  // ============================================================
   async listMyRentals(userId: string) {
     const now = new Date();
 
@@ -617,33 +728,53 @@ export class RentalService {
         startsAt: r.startsAt,
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
+        orderId: r.orderId, // <-- ADICIONADO para o polling do frontend
         track: r.track,
         album: r.album,
       };
     });
   }
 
-  // ----------------------------------------------------------
-  // JOB: expira aluguéis vencidos
-  // ----------------------------------------------------------
+  // ============================================================
+  // JOB
+  // ============================================================
   async expireOutdatedRentals(): Promise<number> {
+    const now = new Date();
+
+    const affected = await this.prisma.rental.findMany({
+      where: {
+        status: RentalStatus.ACTIVE,
+        expiresAt: { lt: now },
+      },
+      select: { userId: true },
+      distinct: ['userId'],
+    });
+
+    if (affected.length === 0) return 0;
+
     const result = await this.prisma.rental.updateMany({
       where: {
         status: RentalStatus.ACTIVE,
-        expiresAt: { lt: new Date() },
+        expiresAt: { lt: now },
       },
       data: { status: RentalStatus.EXPIRED },
     });
 
     if (result.count > 0) {
-      this.logger.log(`Expirou ${result.count} aluguel(is) vencido(s)`);
+      await Promise.all(
+        affected.map((r) => this.entitlement.invalidateUser(r.userId)),
+      );
+      this.logger.log(
+        `Expirou ${result.count} aluguel(is) de ${affected.length} usuário(s)`,
+      );
     }
+
     return result.count;
   }
 
-  // ----------------------------------------------------------
+  // ============================================================
   // HELPERS
-  // ----------------------------------------------------------
+  // ============================================================
   private humanDuration(hours: number): string {
     if (hours < 24) return `${hours} horas`;
     if (hours === 24) return '24 horas';
@@ -652,28 +783,21 @@ export class RentalService {
     return `${days} dias`;
   }
 
-  private sortOrderForHours(hours: number): number {
-    const order = [24, 48, 72, 120, 240, 360];
-    const idx = order.indexOf(hours);
-    return idx >= 0 ? idx + 1 : 99;
-  }
-
-  private async generateRentalCodeTx(tx: any, offset = 0): Promise<string> {
+  private async generateRentalCodeTx(
+    tx: any,
+    offset = 0,
+  ): Promise<string> {
     const year = new Date().getFullYear();
     const prefix = `JMM-AL-${year}-`;
 
-    const last = await tx.rental.findFirst({
-      where: { rentalCode: { startsWith: prefix } },
-      orderBy: { rentalCode: 'desc' },
-      select: { rentalCode: true },
+    const counter = await tx.rentalCodeCounter.upsert({
+      where: { year },
+      create: { year, lastSeq: 1 },
+      update: { lastSeq: { increment: 1 } },
+      select: { lastSeq: true },
     });
 
-    let next = 1;
-    if (last) {
-      const num = parseInt(last.rentalCode.replace(prefix, ''), 10);
-      if (!isNaN(num)) next = num + 1;
-    }
-
-    return `${prefix}${String(next + offset).padStart(6, '0')}`;
+    const seq = counter.lastSeq + offset;
+    return `${prefix}${String(seq).padStart(6, '0')}`;
   }
 }

@@ -51,6 +51,7 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const loadGenerationRef = useRef(0);
   const [current, setCurrent] = useState<Track | null>(null);
   const [queue, setQueue] = useState<Track[]>([]);
   const [playbackInfo, setPlaybackInfo] = useState<PlaybackResponse | null>(null);
@@ -69,38 +70,45 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // CARREGAR FAIXA
   // ─────────────────────────────────────────────────────
   const loadTrack = useCallback(async (track: Track) => {
-    setError(null);
-    setPlaybackInfo(null);
+  const generation = ++loadGenerationRef.current;
 
-    setIsLoading(true);
+  setError(null);
+  setPlaybackInfo(null);
+  setIsLoading(true);
+
+  try {
+    const info = await api.authorize(track.id);
+    if (generation !== loadGenerationRef.current) return;
+
+    setPlaybackInfo(info);
+
+    const a = audioRef.current;
+    if (!a) return;
+
+    a.src = info.url;
+    a.load();
     try {
-      const info = await api.authorize(track.id);
-      setPlaybackInfo(info);
-
-      const a = audioRef.current;
-      if (!a) return;
-
-      a.src = info.url;
-      a.load();
-      try {
-        await a.play();
-      } catch {
-        // Autoplay bloqueado pelo navegador — OK
-      }
-    } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
-      if (err.status === 403) {
-        setError('Você não tem assinatura, aluguel ou preview disponível.');
-      } else if (err.status === 401) {
-        setError('Faça login para ouvir esta faixa.');
-      } else {
-        setError(err.message ?? 'Erro ao carregar a faixa');
-      }
-      setIsPlaying(false);
-    } finally {
+      await a.play();
+    } catch {
+      // Autoplay bloqueado — OK
+    }
+  } catch (e: unknown) {
+    if (generation !== loadGenerationRef.current) return;
+    const err = e as { status?: number; message?: string };
+    if (err.status === 403) {
+      setError('Você não tem assinatura, aluguel ou preview disponível.');
+    } else if (err.status === 401) {
+      setError('Faça login para ouvir esta faixa.');
+    } else {
+      setError(err.message ?? 'Erro ao carregar a faixa');
+    }
+    setIsPlaying(false);
+  } finally {
+    if (generation === loadGenerationRef.current) {
       setIsLoading(false);
     }
-  }, []);
+  }
+}, []);
 
   // ─────────────────────────────────────────────────────
   // PLAY

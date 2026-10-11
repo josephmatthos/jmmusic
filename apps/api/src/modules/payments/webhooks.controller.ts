@@ -5,8 +5,11 @@ import {
   HttpCode,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { MpSignatureGuard } from './guards/mp-signature.guard';
 
 @Controller('webhooks')
 export class WebhooksController {
@@ -14,35 +17,33 @@ export class WebhooksController {
 
   @Post('mercadopago')
   @HttpCode(200)
+  @UseGuards(MpSignatureGuard)
   async mercadopago(
     @Body() body: any,
     @Query() query: any,
-    @Headers('x-signature') xSignature?: string,
-    @Headers('x-request-id') xRequestId?: string,
+    @Req() req: any,
+    @Headers('x-signature') _xSignature?: string,
+    @Headers('x-request-id') _xRequestId?: string,
   ) {
-    // O MP pode enviar o payload no body (novo) ou via query (?topic=...&id=...)
-    const payload =
-      body?.type || body?.topic ? body : { ...query, ...body };
+    const topic = req.mpPayload?.topic ?? body?.type ?? body?.topic;
+    const paymentId =
+      req.mpPayload?.paymentId ?? body?.data?.id ?? query?.['data.id'];
 
-    // Monta a string de validação do HMAC exatamente como o MP espera:
-    // id:<data.id>;request-id:<x-request-id>;ts:<ts>;
-    const dataId = payload?.data?.id ?? query?.['data.id'] ?? '';
-    const ts = this.extractTs(xSignature);
-    const manifest = `id:${dataId};request-id:${xRequestId ?? ''};ts:${ts};`;
-
-    return this.payments.handleWebhook(payload, {
-      xSignature,
-      xRequestId,
-      manifest,
-    });
-  }
-
-  private extractTs(xSignature?: string): string {
-    if (!xSignature) return '';
-    for (const part of xSignature.split(',')) {
-      const [k, v] = part.split('=');
-      if (k?.trim() === 'ts') return v?.trim() ?? '';
+    if (!topic || !paymentId) {
+      return { ok: true, ignored: true };
     }
-    return '';
+
+    if (topic !== 'payment' && topic !== 'payment.updated') {
+      return { ok: true, ignored: true };
+    }
+
+    try {
+      await this.payments.processPaymentNotification(String(paymentId));
+    } catch (err) {
+      // Responde 200 mesmo em falha: o MP retenta em loop se devolvermos 5xx.
+      // O job de reconciliação (se existir) reprocessa.
+    }
+
+    return { ok: true };
   }
 }

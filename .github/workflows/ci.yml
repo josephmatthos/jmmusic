@@ -8,30 +8,81 @@ on:
 jobs:
   api:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: jm
+          POSTGRES_PASSWORD: jm
+          POSTGRES_DB: jm_music_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://jm:jm@localhost:5432/jm_music_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      NODE_ENV: test
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/api/package-lock.json
+
       - name: Install API dependencies
         run: npm --prefix apps/api ci
+
+      - name: Validate Prisma schema
+        run: npx --prefix apps/api prisma validate --schema apps/api/prisma/schema.prisma
+
+      - name: Apply migrations
+        run: npx --prefix apps/api prisma migrate deploy --schema apps/api/prisma/schema.prisma
+
+      - name: Generate Prisma Client
+        run: npx --prefix apps/api prisma generate --schema apps/api/prisma/schema.prisma
+
+      - name: Type check API
+        run: npx --prefix apps/api tsc --noEmit -p apps/api/tsconfig.json
+
       - name: Run API tests
         run: npm --prefix apps/api test -- --runInBand
+
       - name: Build API
         run: npm --prefix apps/api run build
 
   web:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+
       - name: Install web dependencies
         run: npm --prefix apps/web ci
+
+      - name: Type check web
+        run: npx --prefix apps/web tsc --noEmit -p apps/web/tsconfig.json
+
       - name: Build web app
         run: npm --prefix apps/web run build

@@ -1,10 +1,17 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 
 @Injectable()
 export class PlaybackService {
+  private readonly logger = new Logger(PlaybackService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
@@ -26,14 +33,10 @@ export class PlaybackService {
     if (!track) throw new NotFoundException('Faixa não encontrada');
 
     const decision = await this.entitlement.canPlay(userId, trackId);
-
     if (!decision.allowed) {
       throw new ForbiddenException(decision.reason);
     }
 
-    // Assinante/aluguel/admin → streamKey (qualidade cheia)
-    // Preview → previewKey (amostra de 30s)
-    // ⚠️ Sem fallback: se falta a key esperada, é erro (não serve preview pro assinante)
     const usePreview = decision.source === 'preview';
     const key = usePreview ? track.previewKey : track.streamKey;
 
@@ -45,12 +48,19 @@ export class PlaybackService {
       );
     }
 
+    try {
+      this.storage.assertKeyMatchesType(key, usePreview ? 'preview' : 'stream');
+    } catch (e) {
+      this.logger.error(
+        `Track ${track.id} tem key inconsistente (${key}): ${
+          (e as Error).message
+        }`,
+      );
+      throw new ForbiddenException('Áudio indisponível no momento.');
+    }
+
     const { url, expiresAt } = await this.storage.getPlaybackUrl(key);
 
-    // Registra intent-to-play (auditoria).
-    // NOTA: `secondsPlayed: 0` porque o áudio ainda não tocou. Um endpoint
-    // separado (`POST /playback/:id/progress`) deve atualizar isso conforme
-    // o frontend reporta progresso (a cada 15-30s).
     if (userId) {
       await this.prisma.playbackEvent.create({
         data: {
