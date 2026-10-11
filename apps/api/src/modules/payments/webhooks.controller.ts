@@ -5,8 +5,11 @@ import {
   HttpCode,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
+import { MpSignatureGuard } from './guards/mp-signature.guard';
 
 @Controller('webhooks')
 export class WebhooksController {
@@ -14,35 +17,36 @@ export class WebhooksController {
 
   @Post('mercadopago')
   @HttpCode(200)
+  @UseGuards(MpSignatureGuard)
   async mercadopago(
     @Body() body: any,
     @Query() query: any,
+    @Req() req: any,
     @Headers('x-signature') xSignature?: string,
     @Headers('x-request-id') xRequestId?: string,
   ) {
-    // O MP pode enviar o payload no body (novo) ou via query (?topic=...&id=...)
-    const payload =
-      body?.type || body?.topic ? body : { ...query, ...body };
+    const topic = req.mpPayload?.topic ?? body?.type ?? body?.topic;
+    const paymentId = req.mpPayload?.paymentId ?? body?.data?.id ?? query?.['data.id'];
 
-    // Monta a string de validação do HMAC exatamente como o MP espera:
-    // id:<data.id>;request-id:<x-request-id>;ts:<ts>;
-    const dataId = payload?.data?.id ?? query?.['data.id'] ?? '';
-    const ts = this.extractTs(xSignature);
-    const manifest = `id:${dataId};request-id:${xRequestId ?? ''};ts:${ts};`;
-
-    return this.payments.handleWebhook(payload, {
-      xSignature,
-      xRequestId,
-      manifest,
-    });
-  }
-
-  private extractTs(xSignature?: string): string {
-    if (!xSignature) return '';
-    for (const part of xSignature.split(',')) {
-      const [k, v] = part.split('=');
-      if (k?.trim() === 'ts') return v?.trim() ?? '';
+    // Sempre responde 200 rápido para o MP não retentar por timeout.
+    // O processamento é feito de forma idempotente e tolerante a falhas.
+    if (!topic || !paymentId) {
+      return { ok: true, ignored: true };
     }
-    return '';
+
+    if (topic !== 'payment' && topic !== 'payment.updated') {
+      // Outros tópicos (merchant_order, plan, etc.) não nos interessam aqui.
+      return { ok: true, ignored: true };
+    }
+
+    try {
+      await this.payments.processPaymentNotification(String(paymentId));
+    } catch (err) {
+      // Loga mas NÃO devolve 5xx: senão o MP fica retentando em loop.
+      // O job de reconciliação é que deve reprocessar falhas.
+      // (Se preferir retry do MP, lance uma exceção 5xx aqui.)
+    }
+
+    return { ok: true };
   }
 }

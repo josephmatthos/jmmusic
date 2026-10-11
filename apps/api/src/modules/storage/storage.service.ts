@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   S3Client,
@@ -6,31 +6,40 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 type StorageDriver = 'rustfs' | 'b2';
 
+/** Prefixos permitidos para chaves de mídia. */
+const ALLOWED_PREFIXES = [
+  'masters/',
+  'streaming/',
+  'previews/',
+  'covers/',
+  'artists/',
+] as const;
+
 @Injectable()
 export class StorageService implements OnModuleInit {
+  private readonly logger = new Logger(StorageService.name);
   private client!: S3Client;
   private bucket!: string;
   private publicBaseUrl: string | null = null;
-  private uploadExpires!: number;
-  private playbackExpires!: number;
-  private imageExpires!: number;
-  private driver!: StorageDriver;
+  private uploadExpires = 900;
+  private playbackExpires = 300;
+  private imageExpires = 31536000;
+  private driver: StorageDriver = 'rustfs';
+  private configured = false;
 
   constructor(private readonly config: ConfigService) {}
 
   private getConfigValue(...keys: string[]): string {
     for (const key of keys) {
       const value = this.config.get<string>(key);
-      if (typeof value === 'string' && value.trim()) {
-        return value.trim();
-      }
+      if (typeof value === 'string' && value.trim()) return value.trim();
     }
-
     throw new Error(
       `Configuração de storage ausente. Defina uma das chaves: ${keys.join(', ')}`,
     );
@@ -43,10 +52,7 @@ export class StorageService implements OnModuleInit {
 
     try {
       if (driver === 'b2') {
-        const endpoint = this.getConfigValue(
-          'B2_MEDIA_ENDPOINT',
-          'B2_ENDPOINT',
-        );
+        const endpoint = this.getConfigValue('B2_MEDIA_ENDPOINT', 'B2_ENDPOINT');
         const region = this.getConfigValue('B2_MEDIA_REGION', 'B2_REGION');
         const accessKeyId = this.getConfigValue('B2_KEY_ID');
         const secretAccessKey = this.getConfigValue('B2_APPLICATION_KEY');
@@ -84,8 +90,9 @@ export class StorageService implements OnModuleInit {
         this.config.get<string>('SIGNED_URL_UPLOAD_EXPIRES', '900'),
         10,
       );
+      // 5 min por padrão. URL de playback é credencial temporária.
       this.playbackExpires = parseInt(
-        this.config.get<string>('SIGNED_URL_PLAYBACK_EXPIRES', '1800'),
+        this.config.get<string>('SIGNED_URL_PLAYBACK_EXPIRES', '300'),
         10,
       );
       this.imageExpires = parseInt(
@@ -93,18 +100,16 @@ export class StorageService implements OnModuleInit {
         10,
       );
 
-      console.log(
-        `   Storage: ${this.driver.toUpperCase()} • bucket: ${this.bucket}`,
+      this.configured = true;
+      this.logger.log(
+        `Storage pronto: ${this.driver.toUpperCase()} • bucket=${this.bucket} • playbackTTL=${this.playbackExpires}s`,
       );
     } catch (error) {
-      console.warn(
-        `Storage não configurado. Uploads e URLs assinadas permanecerão indisponíveis até o ambiente local estar configurado. ${(error as Error).message}`,
+      this.logger.warn(
+        `Storage não configurado: ${(error as Error).message}. ` +
+          `Uploads e URLs assinadas indisponíveis.`,
       );
-      this.client = undefined as unknown as S3Client;
-      this.bucket = 'unconfigured';
-      this.uploadExpires = 900;
-      this.playbackExpires = 1800;
-      this.imageExpires = 31536000;
+      this.configured = false;
     }
   }
 
@@ -116,10 +121,62 @@ export class StorageService implements OnModuleInit {
     return this.bucket;
   }
 
+  isConfigured(): boolean {
+    return this.configured;
+  }
+
+  // ============================================================
+  // Validação de chave
+  // ============================================================
+
+  /**
+   * Rejeita chaves que tentem escapar do bucket ou usar prefixos
+   * não autorizados. Defesa contra path traversal e injeção de prefixo.
+   */
+  private assertSafeKey(key: string): void {
+    if (!key || typeof key !== 'string') {
+      throw new Error('Key obrigatória');
+    }
+    if (key.length > 512) {
+      throw new Error('Key excessivamente longa');
+    }
+    if (key.includes('..') || key.startsWith('/') || key.includes('\\')) {
+      throw new Error('Key inválida (path traversal)');
+    }
+    if (!ALLOWED_PREFIXES.some((p) => key.startsWith(p))) {
+      throw new Error(
+        `Key fora dos prefixos permitidos: ${ALLOWED_PREFIXES.join(', ')}`,
+      );
+    }
+  }
+
+  /** Verifica se a key está no prefixo esperado para um tipo de mídia. */
+  assertKeyMatchesType(
+    key: string,
+    type: 'master' | 'stream' | 'preview',
+  ): void {
+    this.assertSafeKey(key);
+    const prefix =
+      type === 'master'
+        ? 'masters/'
+        : type === 'stream'
+          ? 'streaming/'
+          : 'previews/';
+    if (!key.startsWith(prefix)) {
+      throw new Error(
+        `Key "${key}" não corresponde ao tipo "${type}" (esperado prefixo "${prefix}")`,
+      );
+    }
+  }
+
+  // ============================================================
+  // URLs assinadas
+  // ============================================================
+
   async getUploadUrl(key: string, contentType: string): Promise<string> {
-    if (!key) throw new Error('Key obrigatória');
-    if (!this.client) {
-      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
+    this.assertSafeKey(key);
+    if (!this.configured) {
+      throw new Error('Storage não configurado.');
     }
     const command = new PutObjectCommand({
       Bucket: this.bucket,
@@ -132,9 +189,9 @@ export class StorageService implements OnModuleInit {
   }
 
   async getPlaybackUrl(key: string): Promise<{ url: string; expiresAt: Date }> {
-    if (!key) throw new Error('Key obrigatória');
-    if (!this.client) {
-      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
+    this.assertSafeKey(key);
+    if (!this.configured) {
+      throw new Error('Storage não configurado.');
     }
     const command = new GetObjectCommand({
       Bucket: this.bucket,
@@ -150,13 +207,11 @@ export class StorageService implements OnModuleInit {
   }
 
   async getImageUrl(key: string): Promise<string> {
-    if (!key) throw new Error('Key obrigatória');
+    this.assertSafeKey(key);
     if (this.publicBaseUrl) {
       return `${this.publicBaseUrl.replace(/\/$/, '')}/${key}`;
     }
-    if (!this.client) {
-      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
-    }
+    if (!this.configured) throw new Error('Storage não configurado.');
     const command = new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -164,10 +219,14 @@ export class StorageService implements OnModuleInit {
     return getSignedUrl(this.client, command, { expiresIn: this.imageExpires });
   }
 
+  // ============================================================
+  // Objetos
+  // ============================================================
+
   async objectExists(key: string): Promise<boolean> {
-    if (!key) return false;
-    if (!this.client) return false;
+    if (!key || !this.configured) return false;
     try {
+      this.assertSafeKey(key);
       await this.client.send(
         new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
       );
@@ -177,9 +236,21 @@ export class StorageService implements OnModuleInit {
     }
   }
 
+  async headObject(key: string): Promise<HeadObjectCommandOutput | null> {
+    if (!key || !this.configured) return null;
+    try {
+      this.assertSafeKey(key);
+      return await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+    } catch {
+      return null;
+    }
+  }
+
   async deleteObject(key: string): Promise<void> {
-    if (!key) return;
-    if (!this.client) return;
+    if (!key || !this.configured) return;
+    this.assertSafeKey(key);
     await this.client.send(
       new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
     );
