@@ -5,7 +5,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHmac } from 'crypto';
 import {
   OrderStatus,
   RentalStatus,
@@ -13,6 +12,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MercadopagoService } from '../mercadopago/mercadopago.service';
+import { EntitlementService } from '../entitlement/entitlement.service';
 
 @Injectable()
 export class PaymentsService {
@@ -22,11 +22,12 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly mp: MercadopagoService,
     private readonly config: ConfigService,
+    private readonly entitlement: EntitlementService,
   ) {}
 
-  // ----------------------------------------------------------
-  // CRIAR CHECKOUT DE ASSINATURA
-  // ----------------------------------------------------------
+  // ============================================================
+  // CHECKOUT — Assinatura
+  // ============================================================
   async createSubscriptionCheckout(userId: string, planId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -40,7 +41,6 @@ export class PaymentsService {
     if (!plan || !plan.active) {
       throw new NotFoundException('Plano não encontrado ou inativo');
     }
-
     if (plan.priceCents === 0) {
       throw new BadRequestException('Plano gratuito não requer checkout');
     }
@@ -102,9 +102,9 @@ export class PaymentsService {
     };
   }
 
-  // ----------------------------------------------------------
-  // CRIAR CHECKOUT DE ALUGUEL (pagamento avulso)
-  // ----------------------------------------------------------
+  // ============================================================
+  // CHECKOUT — Aluguel avulso
+  // ============================================================
   async createRentalCheckout(userId: string, orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -138,15 +138,14 @@ export class PaymentsService {
     };
   }
 
-  // ----------------------------------------------------------
-  // STATUS DE UMA ASSINATURA (polling)
-  // ----------------------------------------------------------
+  // ============================================================
+  // ASSINATURA — polling / cancelar / minha
+  // ============================================================
   async getSubscriptionStatus(userId: string, subscriptionId: string) {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: { plan: true },
     });
-
     if (!sub || sub.userId !== userId) {
       throw new NotFoundException('Assinatura não encontrada');
     }
@@ -165,7 +164,7 @@ export class PaymentsService {
             ? new Date(mp.next_payment_date)
             : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-          return this.prisma.subscription.update({
+          const updated = await this.prisma.subscription.update({
             where: { id: sub.id },
             data: {
               status: SubscriptionStatus.ACTIVE,
@@ -174,13 +173,18 @@ export class PaymentsService {
             },
             include: { plan: true },
           });
+
+          await this.entitlement.invalidateUser(userId);
+          return updated;
         }
         if (mp.status === 'cancelled') {
-          return this.prisma.subscription.update({
+          const updated = await this.prisma.subscription.update({
             where: { id: sub.id },
             data: { status: SubscriptionStatus.CANCELLED },
             include: { plan: true },
           });
+          await this.entitlement.invalidateUser(userId);
+          return updated;
         }
       } catch (e) {
         this.logger.warn(`Erro consultando MP: ${(e as Error).message}`);
@@ -190,9 +194,6 @@ export class PaymentsService {
     return sub;
   }
 
-  // ----------------------------------------------------------
-  // CANCELAR ASSINATURA
-  // ----------------------------------------------------------
   async cancelSubscription(userId: string, subscriptionId: string) {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
@@ -209,7 +210,7 @@ export class PaymentsService {
       }
     }
 
-    return this.prisma.subscription.update({
+    const updated = await this.prisma.subscription.update({
       where: { id: sub.id },
       data: {
         status: SubscriptionStatus.CANCELLED,
@@ -217,11 +218,11 @@ export class PaymentsService {
       },
       include: { plan: true },
     });
+
+    await this.entitlement.invalidateUser(userId);
+    return updated;
   }
 
-  // ----------------------------------------------------------
-  // MINHA ASSINATURA ATUAL
-  // ----------------------------------------------------------
   async getMySubscription(userId: string) {
     const sub = await this.prisma.subscription.findFirst({
       where: {
@@ -233,144 +234,77 @@ export class PaymentsService {
       orderBy: { createdAt: 'desc' },
       include: { plan: true },
     });
-
     return sub ?? null;
   }
 
-  // ----------------------------------------------------------
-  // WEBHOOK — retry-safe + idempotente
-  // ----------------------------------------------------------
-  async handleWebhook(
-    payload: any,
-    signature?: {
-      xSignature?: string;
-      xRequestId?: string;
-      manifest?: string;
-    },
-  ) {
-    // Valida assinatura HMAC em produção
-    if (this.config.get<string>('NODE_ENV') === 'production') {
-      this.verifySignature(signature);
-    }
-
-    const eventId =
-      payload?.id ??
-      payload?.data?.id ??
-      `${Date.now()}-${Math.random()}`;
+  // ============================================================
+  // WEBHOOK — ponto de entrada após o MpSignatureGuard
+  // ============================================================
+  async processPaymentNotification(paymentId: string) {
+    const externalEventId = String(paymentId);
 
     const existing = await this.prisma.paymentEvent.findUnique({
       where: {
         provider_externalEventId: {
           provider: 'mercadopago',
-          externalEventId: String(eventId),
+          externalEventId,
         },
       },
     });
 
-    // Se já foi processado com sucesso → duplicate
     if (existing?.processedAt) {
-      return { ok: true, duplicate: true };
+      this.logger.log(`Evento ${externalEventId} já processado. Ignorando.`);
+      return;
     }
 
-    // Se não existe → cria com processedAt null (pending)
     if (!existing) {
       await this.prisma.paymentEvent.create({
         data: {
           provider: 'mercadopago',
-          externalEventId: String(eventId),
-          eventType: String(payload?.type ?? payload?.topic ?? 'unknown'),
-          payload,
-          // processedAt: null por padrão → ainda não processado
+          externalEventId,
+          eventType: 'payment',
+          payload: { data: { id: externalEventId } },
         },
       });
     }
 
-    const type = payload?.type ?? payload?.topic;
-    const resourceId = payload?.data?.id ?? payload?.resource;
+    await this.handlePaymentEvent(externalEventId);
 
-    try {
-      if (type === 'preapproval' || type === 'subscription_preapproval') {
-        await this.handlePreapprovalEvent(String(resourceId));
-      } else if (type === 'payment') {
-        await this.handlePaymentEvent(String(resourceId));
-      }
-
-      // Marca como processado SÓ após sucesso
-      await this.prisma.paymentEvent.update({
-        where: {
-          provider_externalEventId: {
-            provider: 'mercadopago',
-            externalEventId: String(eventId),
-          },
+    await this.prisma.paymentEvent.update({
+      where: {
+        provider_externalEventId: {
+          provider: 'mercadopago',
+          externalEventId,
         },
-        data: { processedAt: new Date() },
-      });
-
-      return { ok: true };
-    } catch (e) {
-      this.logger.error(
-        `Erro processando webhook ${type}: ${(e as Error).message}`,
-        (e as Error).stack,
-      );
-      // Re-lança pra NestJS retornar 500 e o MP retentar
-      throw e;
-    }
+      },
+      data: { processedAt: new Date() },
+    });
   }
 
-  private verifySignature(sig?: {
-    xSignature?: string;
-    xRequestId?: string;
-    manifest?: string;
-  }) {
-    const secret = this.config.get<string>('MERCADOPAGO_WEBHOOK_SECRET');
-    const isProduction = this.config.get<string>('NODE_ENV') === 'production';
-
-    if (isProduction && !secret) {
-      throw new Error('MERCADOPAGO_WEBHOOK_SECRET é obrigatório em produção');
-    }
-
-    if (!secret) {
-      this.logger.warn(
-        'MERCADOPAGO_WEBHOOK_SECRET ausente — pulando validação (INSEGURO)',
-      );
-      return;
-    }
-
-    if (!sig?.xSignature || !sig?.manifest) {
-      throw new BadRequestException('Assinatura do webhook ausente');
-    }
-
-    const v1 = sig.xSignature
-      .split(',')
-      .map((part) => part.trim())
-      .map((part) => part.split('='))
-      .find(([key]) => key?.trim() === 'v1')?.[1]
-      ?.trim();
-
-    if (!v1 || !sig.manifest.trim()) {
-      throw new BadRequestException('Manifest do webhook inválido');
-    }
-
-    const expected = createHmac('sha256', secret)
-      .update(sig.manifest)
-      .digest('hex');
-
-    if (v1 !== expected) {
-      this.logger.error('Assinatura do webhook inválida');
-      throw new BadRequestException('Assinatura inválida');
-    }
-  }
-
+  // ============================================================
+  // HANDLERS INTERNOS
+  // ============================================================
   private async handlePreapprovalEvent(preapprovalId: string) {
     const sub = await this.prisma.subscription.findFirst({
       where: { externalSubscriptionId: preapprovalId },
+      select: { id: true, userId: true },
     });
     if (!sub) {
       this.logger.warn(`Preapproval ${preapprovalId} sem assinatura local`);
       return;
     }
 
-    const mp = await this.mp.getPreapproval(preapprovalId);
+    let mp: any;
+    try {
+      mp = await this.mp.getPreapproval(preapprovalId);
+    } catch (e) {
+      this.logger.error(
+        `Falha consultando preapproval ${preapprovalId}: ${
+          (e as Error).message
+        }`,
+      );
+      throw e;
+    }
 
     if (mp.status === 'authorized') {
       const startsAt = mp.date_created
@@ -388,29 +322,34 @@ export class PaymentsService {
           currentPeriodEnd: next,
         },
       });
+      await this.entitlement.invalidateUser(sub.userId);
       this.logger.log(`Assinatura ${sub.id} ATIVADA`);
     } else if (mp.status === 'cancelled') {
       await this.prisma.subscription.update({
         where: { id: sub.id },
         data: { status: SubscriptionStatus.CANCELLED },
       });
+      await this.entitlement.invalidateUser(sub.userId);
     } else if (mp.status === 'paused') {
       await this.prisma.subscription.update({
         where: { id: sub.id },
         data: { status: SubscriptionStatus.PAUSED },
       });
+      await this.entitlement.invalidateUser(sub.userId);
     }
   }
 
   private async handlePaymentEvent(paymentId: string) {
     const payment = await this.mp.getPayment(paymentId);
-    const ref = payment.external_reference;
+    if (!payment) return;
+
+    const ref = payment.external_reference as string | undefined;
     if (!ref) return;
 
-    // Assinatura já é tratada em handlePreapprovalEvent
+    // Assinatura é tratada em handlePreapprovalEvent
     if (ref.startsWith('sub-')) return;
 
-    // Aluguel: prefixo ord- (ou compat: UUID puro)
+    // Aluguel: prefixo ord-
     const orderId = ref.startsWith('ord-') ? ref.slice(4) : ref;
 
     const order = await this.prisma.order.findUnique({
@@ -423,7 +362,20 @@ export class PaymentsService {
     }
 
     if (payment.status === 'approved') {
-      if (order.status === OrderStatus.PAID) return; // idempotência
+      if (order.status === OrderStatus.PAID) return; // idempotente
+
+      const mpAmountCents = Math.round(
+        Number(payment.transaction_amount) * 100,
+      );
+      if (
+        mpAmountCents !== order.totalCents ||
+        payment.currency_id !== order.currency
+      ) {
+        this.logger.error(
+          `Divergência no pedido ${order.id}: MP=${mpAmountCents} ${payment.currency_id} vs DB=${order.totalCents} ${order.currency}. Não aplicado.`,
+        );
+        return;
+      }
 
       await this.prisma.$transaction(async (tx) => {
         await tx.order.update({
@@ -438,7 +390,6 @@ export class PaymentsService {
         for (const item of order.items) {
           if (!item.productId) continue;
 
-          // productId é SEMPRE RentalProduct.id (faixa OU álbum)
           const product = await tx.rentalProduct.findUnique({
             where: { id: item.productId },
           });
@@ -454,7 +405,6 @@ export class PaymentsService {
             startsAt.getTime() + product.durationHours * 60 * 60 * 1000,
           );
 
-          // Caso 1: produto de FAIXA → cria 1 rental
           if (product.trackId) {
             await tx.rental.create({
               data: {
@@ -468,14 +418,9 @@ export class PaymentsService {
                 expiresAt,
               },
             });
-          }
-          // Caso 2: produto de ÁLBUM → cria N rentals (todas as faixas publicadas)
-          else if (product.albumId) {
+          } else if (product.albumId) {
             const albumTracks = await tx.track.findMany({
-              where: {
-                albumId: product.albumId,
-                status: 'PUBLISHED',
-              },
+              where: { albumId: product.albumId, status: 'PUBLISHED' },
               select: { id: true },
             });
 
@@ -496,6 +441,8 @@ export class PaymentsService {
           }
         }
       });
+
+      await this.entitlement.invalidateUser(order.userId);
       this.logger.log(`Order ${order.id} paga → rentals criados`);
     } else if (
       payment.status === 'refunded' ||
@@ -511,6 +458,7 @@ export class PaymentsService {
           data: { status: RentalStatus.CANCELLED },
         }),
       ]);
+      await this.entitlement.invalidateUser(order.userId);
       this.logger.log(`Order ${order.id} reembolsada → rentals cancelados`);
     } else if (
       payment.status === 'rejected' ||
@@ -523,6 +471,9 @@ export class PaymentsService {
     }
   }
 
+  // ============================================================
+  // HELPERS
+  // ============================================================
   private async generateRentalCodeTx(
     tx: any,
     offset = 0,
@@ -530,18 +481,14 @@ export class PaymentsService {
     const year = new Date().getFullYear();
     const prefix = `JMM-AL-${year}-`;
 
-    const last = await tx.rental.findFirst({
-      where: { rentalCode: { startsWith: prefix } },
-      orderBy: { rentalCode: 'desc' },
-      select: { rentalCode: true },
+    const counter = await tx.rentalCodeCounter.upsert({
+      where: { year },
+      create: { year, lastSeq: 1 },
+      update: { lastSeq: { increment: 1 } },
+      select: { lastSeq: true },
     });
 
-    let next = 1;
-    if (last) {
-      const num = parseInt(last.rentalCode.replace(prefix, ''), 10);
-      if (!isNaN(num)) next = num + 1;
-    }
-
-    return `${prefix}${String(next + offset).padStart(6, '0')}`;
+    const seq = counter.lastSeq + offset;
+    return `${prefix}${String(seq).padStart(6, '0')}`;
   }
 }

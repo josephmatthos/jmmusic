@@ -137,6 +137,7 @@ export interface AlbumRentalOrder {
 export interface Rental {
   id: string;
   rentalCode: string;
+  orderId: string | null; // <-- ADICIONAR
   status: 'PENDING' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED';
   startsAt: string;
   expiresAt: string;

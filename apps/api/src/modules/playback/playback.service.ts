@@ -33,7 +33,6 @@ export class PlaybackService {
     if (!track) throw new NotFoundException('Faixa não encontrada');
 
     const decision = await this.entitlement.canPlay(userId, trackId);
-
     if (!decision.allowed) {
       throw new ForbiddenException(decision.reason);
     }
@@ -49,17 +48,13 @@ export class PlaybackService {
       );
     }
 
-    // Defesa em profundidade: a key no banco precisa estar no
-    // prefixo correto. Impede que um admin coloque um master em
-    // streamKey por engano e vaze áudio de alta qualidade.
     try {
-      this.storage.assertKeyMatchesType(
-        key,
-        usePreview ? 'preview' : 'stream',
-      );
+      this.storage.assertKeyMatchesType(key, usePreview ? 'preview' : 'stream');
     } catch (e) {
       this.logger.error(
-        `Track ${track.id} tem key inconsistente (${key}): ${(e as Error).message}`,
+        `Track ${track.id} tem key inconsistente (${key}): ${
+          (e as Error).message
+        }`,
       );
       throw new ForbiddenException('Áudio indisponível no momento.');
     }

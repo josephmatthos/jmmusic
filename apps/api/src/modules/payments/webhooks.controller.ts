@@ -22,29 +22,26 @@ export class WebhooksController {
     @Body() body: any,
     @Query() query: any,
     @Req() req: any,
-    @Headers('x-signature') xSignature?: string,
-    @Headers('x-request-id') xRequestId?: string,
+    @Headers('x-signature') _xSignature?: string,
+    @Headers('x-request-id') _xRequestId?: string,
   ) {
     const topic = req.mpPayload?.topic ?? body?.type ?? body?.topic;
-    const paymentId = req.mpPayload?.paymentId ?? body?.data?.id ?? query?.['data.id'];
+    const paymentId =
+      req.mpPayload?.paymentId ?? body?.data?.id ?? query?.['data.id'];
 
-    // Sempre responde 200 rápido para o MP não retentar por timeout.
-    // O processamento é feito de forma idempotente e tolerante a falhas.
     if (!topic || !paymentId) {
       return { ok: true, ignored: true };
     }
 
     if (topic !== 'payment' && topic !== 'payment.updated') {
-      // Outros tópicos (merchant_order, plan, etc.) não nos interessam aqui.
       return { ok: true, ignored: true };
     }
 
     try {
       await this.payments.processPaymentNotification(String(paymentId));
     } catch (err) {
-      // Loga mas NÃO devolve 5xx: senão o MP fica retentando em loop.
-      // O job de reconciliação é que deve reprocessar falhas.
-      // (Se preferir retry do MP, lance uma exceção 5xx aqui.)
+      // Responde 200 mesmo em falha: o MP retenta em loop se devolvermos 5xx.
+      // O job de reconciliação (se existir) reprocessa.
     }
 
     return { ok: true };

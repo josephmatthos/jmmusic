@@ -378,3 +378,12 @@ model EmailVerificationToken {
   @@index([userId])
   @@map("email_verification_tokens")
 }
+
+// ============================================================
+// CONTADOR ATÔMICO DE CÓDIGOS DE ALUGUEL
+// ============================================================
+
+model RentalCodeCounter {
+  year    Int    @id
+  lastSeq Int    @default(0) @map("last_seq")
+}

@@ -12,7 +12,6 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 type StorageDriver = 'rustfs' | 'b2';
 
-/** Prefixos permitidos para chaves de mídia. */
 const ALLOWED_PREFIXES = [
   'masters/',
   'streaming/',
@@ -90,7 +89,6 @@ export class StorageService implements OnModuleInit {
         this.config.get<string>('SIGNED_URL_UPLOAD_EXPIRES', '900'),
         10,
       );
-      // 5 min por padrão. URL de playback é credencial temporária.
       this.playbackExpires = parseInt(
         this.config.get<string>('SIGNED_URL_PLAYBACK_EXPIRES', '300'),
         10,
@@ -106,8 +104,7 @@ export class StorageService implements OnModuleInit {
       );
     } catch (error) {
       this.logger.warn(
-        `Storage não configurado: ${(error as Error).message}. ` +
-          `Uploads e URLs assinadas indisponíveis.`,
+        `Storage não configurado: ${(error as Error).message}. Uploads e URLs assinadas indisponíveis.`,
       );
       this.configured = false;
     }
@@ -125,14 +122,6 @@ export class StorageService implements OnModuleInit {
     return this.configured;
   }
 
-  // ============================================================
-  // Validação de chave
-  // ============================================================
-
-  /**
-   * Rejeita chaves que tentem escapar do bucket ou usar prefixos
-   * não autorizados. Defesa contra path traversal e injeção de prefixo.
-   */
   private assertSafeKey(key: string): void {
     if (!key || typeof key !== 'string') {
       throw new Error('Key obrigatória');
@@ -150,7 +139,6 @@ export class StorageService implements OnModuleInit {
     }
   }
 
-  /** Verifica se a key está no prefixo esperado para um tipo de mídia. */
   assertKeyMatchesType(
     key: string,
     type: 'master' | 'stream' | 'preview',
@@ -169,15 +157,9 @@ export class StorageService implements OnModuleInit {
     }
   }
 
-  // ============================================================
-  // URLs assinadas
-  // ============================================================
-
   async getUploadUrl(key: string, contentType: string): Promise<string> {
     this.assertSafeKey(key);
-    if (!this.configured) {
-      throw new Error('Storage não configurado.');
-    }
+    if (!this.configured) throw new Error('Storage não configurado.');
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -190,9 +172,7 @@ export class StorageService implements OnModuleInit {
 
   async getPlaybackUrl(key: string): Promise<{ url: string; expiresAt: Date }> {
     this.assertSafeKey(key);
-    if (!this.configured) {
-      throw new Error('Storage não configurado.');
-    }
+    if (!this.configured) throw new Error('Storage não configurado.');
     const command = new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -218,10 +198,6 @@ export class StorageService implements OnModuleInit {
     });
     return getSignedUrl(this.client, command, { expiresIn: this.imageExpires });
   }
-
-  // ============================================================
-  // Objetos
-  // ============================================================
 
   async objectExists(key: string): Promise<boolean> {
     if (!key || !this.configured) return false;

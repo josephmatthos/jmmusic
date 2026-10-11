@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, RentalProduct, Track, Rental } from '@/lib/api';
 import { formatPrice, formatDate } from '@/lib/format';
 import { useAuth } from '@/lib/auth';
@@ -28,6 +28,12 @@ export function RentModal({
   initialTab = 'track',
 }: Props) {
   const { isAuthenticated } = useAuth();
+
+  const idempotencyKeyRef = useRef<string>(
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+);
 
   const [tab, setTab] = useState<Tab>(initialTab);
   const [trackProducts, setTrackProducts] = useState<RentalProduct[]>([]);
@@ -138,55 +144,55 @@ export function RentModal({
   // CONTINUAR → cria pedido + cria preference do MP + redireciona
   // ------------------------------------------------------------
   async function handleContinue() {
-    setProcessing(true);
-    setError(null);
+  setProcessing(true);
+  setError(null);
 
-    // Idempotency-Key única pra essa tentativa.
-    const idempotencyKey =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    let orderId: string;
 
-    try {
-      let orderId: string;
-
-      if (tab === 'track') {
-        if (!selectedTrack) return;
-        const order = await api.createRentalOrder(
-          selectedTrack,
-          idempotencyKey,
-        );
-        orderId = order.order.id;
-      } else {
-        if (!selectedAlbum || !albumId) return;
-        const product = albumProducts.find((p) => p.id === selectedAlbum);
-        if (!product) {
-          setError('Duração inválida');
-          return;
-        }
-        const order = await api.createAlbumRentalOrder(
-          albumId,
-          product.durationHours,
-          idempotencyKey,
-        );
-        orderId = order.order.id;
-      }
-
-      const checkout = await api.createRentalCheckout(orderId);
-
-      if (!checkout.checkoutUrl) {
-        setError(
-          'Não foi possível iniciar o pagamento. Verifique se o Mercado Pago está configurado.',
-        );
+    if (tab === 'track') {
+      if (!selectedTrack) return;
+      const order = await api.createRentalOrder(
+        selectedTrack,
+        idempotencyKeyRef.current,
+      );
+      orderId = order.order.id;
+    } else {
+      if (!selectedAlbum || !albumId) return;
+      const product = albumProducts.find((p) => p.id === selectedAlbum);
+      if (!product) {
+        setError('Duração inválida');
         return;
       }
-
-      window.location.href = checkout.checkoutUrl;
-    } catch (e) {
-      setError((e as Error).message);
-      setProcessing(false);
+      const order = await api.createAlbumRentalOrder(
+        albumId,
+        product.durationHours,
+        idempotencyKeyRef.current,
+      );
+      orderId = order.order.id;
     }
+
+    const checkout = await api.createRentalCheckout(orderId);
+
+    if (!checkout.checkoutUrl) {
+      setError(
+        'Não foi possível iniciar o pagamento. Verifique se o Mercado Pago está configurado.',
+      );
+      return;
+    }
+
+    sessionStorage.setItem('jm_last_order_id', orderId);
+    window.location.href = checkout.checkoutUrl;
+  } catch (e: any) {
+    const msg = e?.message ?? 'Erro ao processar';
+    if (e?.status === 403 || msg.includes('Requisição inválida')) {
+      setError('Não foi possível validar seu pedido. Tente novamente.');
+    } else {
+      setError(msg);
+    }
+    setProcessing(false);
   }
+}
 
   const cover = track.album?.coverUrl;
   const products = tab === 'track' ? trackProducts : albumProducts;

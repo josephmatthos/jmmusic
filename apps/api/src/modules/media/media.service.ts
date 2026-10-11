@@ -9,14 +9,12 @@ import { StorageService } from '../storage/storage.service';
 import { UploadUrlDto } from './dto/upload-url.dto';
 import { AttachMediaDto } from './dto/attach-media.dto';
 
-/** Limites de tamanho por tipo (bytes). */
 const MAX_SIZE_BY_TYPE: Record<'master' | 'stream' | 'preview', number> = {
-  master: 500 * 1024 * 1024, // 500 MB
-  stream: 100 * 1024 * 1024, // 100 MB
-  preview: 5 * 1024 * 1024, // 5 MB
+  master: 500 * 1024 * 1024,
+  stream: 100 * 1024 * 1024,
+  preview: 5 * 1024 * 1024,
 };
 
-/** Content-types aceitos. */
 const ALLOWED_MIME: Record<
   'master' | 'stream' | 'preview',
   ReadonlyArray<string>
@@ -35,10 +33,6 @@ export class MediaService {
     private readonly storage: StorageService,
   ) {}
 
-  // ============================================================
-  // UPLOAD URL
-  // ============================================================
-
   async createUploadUrl(dto: UploadUrlDto) {
     const track = await this.prisma.track.findUnique({
       where: { id: dto.trackId },
@@ -50,7 +44,6 @@ export class MediaService {
     if (!ALLOWED_MIME[type]) {
       throw new BadRequestException('Tipo de mídia inválido');
     }
-
     if (!ALLOWED_MIME[type].includes(dto.contentType)) {
       throw new BadRequestException(
         `Content-Type "${dto.contentType}" não permitido para "${type}". ` +
@@ -63,9 +56,7 @@ export class MediaService {
       throw new BadRequestException('Extensão não suportada');
     }
 
-    // Key determinística — o attach() vai reconstruir e comparar
     const key = this.buildKey(type, track.slug, extension);
-
     const url = await this.storage.getUploadUrl(key, dto.contentType);
 
     return {
@@ -77,10 +68,6 @@ export class MediaService {
       maxSizeBytes: MAX_SIZE_BY_TYPE[type],
     };
   }
-
-  // ============================================================
-  // ATTACH
-  // ============================================================
 
   async attach(dto: AttachMediaDto) {
     const track = await this.prisma.track.findUnique({
@@ -94,15 +81,12 @@ export class MediaService {
       throw new BadRequestException('Tipo de mídia inválido');
     }
 
-    // 1) A key precisa pertencer ao prefixo esperado para o tipo
     try {
       this.storage.assertKeyMatchesType(dto.key, type);
     } catch (e) {
       throw new BadRequestException((e as Error).message);
     }
 
-    // 2) A key precisa ter o slug da faixa correta no path
-    //    Isso impede anexar mídia de uma faixa a outra (IDOR de escrita)
     const expectedPrefix = this.buildKeyPrefix(type, track.slug);
     if (!dto.key.startsWith(expectedPrefix)) {
       this.logger.warn(
@@ -113,7 +97,6 @@ export class MediaService {
       );
     }
 
-    // 3) O objeto precisa existir no storage
     const head = await this.storage.headObject(dto.key);
     if (!head) {
       throw new BadRequestException(
@@ -121,18 +104,18 @@ export class MediaService {
       );
     }
 
-    // 4) Tamanho máximo por tipo
     const size = head.ContentLength ?? 0;
     if (size <= 0) {
       throw new BadRequestException('Objeto com tamanho inválido.');
     }
     if (size > MAX_SIZE_BY_TYPE[type]) {
       throw new BadRequestException(
-        `Arquivo excede o limite de ${Math.round(MAX_SIZE_BY_TYPE[type] / 1024 / 1024)} MB para "${type}".`,
+        `Arquivo excede o limite de ${Math.round(
+          MAX_SIZE_BY_TYPE[type] / 1024 / 1024,
+        )} MB para "${type}".`,
       );
     }
 
-    // 5) Content-Type confere com o esperado
     const mime = (head.ContentType ?? '').toLowerCase();
     if (!mime || !ALLOWED_MIME[type].includes(mime)) {
       throw new BadRequestException(
@@ -140,7 +123,6 @@ export class MediaService {
       );
     }
 
-    // 6) Persiste
     const field = this.fieldForType(type);
     return this.prisma.track.update({
       where: { id: dto.trackId },
@@ -156,10 +138,6 @@ export class MediaService {
       },
     });
   }
-
-  // ============================================================
-  // HELPERS
-  // ============================================================
 
   private buildKeyPrefix(
     type: 'master' | 'stream' | 'preview',
