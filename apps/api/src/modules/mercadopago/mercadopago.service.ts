@@ -16,12 +16,15 @@ const MP_API = 'https://api.mercadopago.com';
 @Injectable()
 export class MercadopagoService {
   private readonly logger = new Logger(MercadopagoService.name);
-  private readonly accessToken: string;
+  private readonly accessToken: string | undefined;
 
   constructor(private readonly config: ConfigService) {
-    this.accessToken = this.config.getOrThrow<string>(
-      'MERCADOPAGO_ACCESS_TOKEN',
-    );
+    this.accessToken = this.config.get<string>('MERCADOPAGO_ACCESS_TOKEN');
+    if (!this.accessToken) {
+      this.logger.warn(
+        'MERCADOPAGO_ACCESS_TOKEN ausente — checkout/webhooks de pagamento ficarão indisponíveis até a configuração do ambiente.',
+      );
+    }
   }
 
   // ----------------------------------------------------------
@@ -31,6 +34,12 @@ export class MercadopagoService {
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    if (!this.accessToken) {
+      throw new BadRequestException(
+        'MERCADOPAGO_ACCESS_TOKEN não configurado. Configure o ambiente antes de usar pagamentos.',
+      );
+    }
+
     const res = await fetch(`${MP_API}${path}`, {
       ...options,
       headers: {

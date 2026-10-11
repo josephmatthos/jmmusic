@@ -23,61 +23,89 @@ export class StorageService implements OnModuleInit {
 
   constructor(private readonly config: ConfigService) {}
 
+  private getConfigValue(...keys: string[]): string {
+    for (const key of keys) {
+      const value = this.config.get<string>(key);
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+
+    throw new Error(
+      `Configuração de storage ausente. Defina uma das chaves: ${keys.join(', ')}`,
+    );
+  }
+
   onModuleInit() {
     const driver = (this.config.get<string>('STORAGE_DRIVER', 'rustfs') ??
       'rustfs') as StorageDriver;
     this.driver = driver;
 
-    if (driver === 'b2') {
-      const endpoint = this.config.getOrThrow<string>('B2_MEDIA_ENDPOINT');
-      const region = this.config.get<string>('B2_MEDIA_REGION', 'us-east-005');
-      const accessKeyId = this.config.getOrThrow<string>('B2_KEY_ID');
-      const secretAccessKey =
-        this.config.getOrThrow<string>('B2_APPLICATION_KEY');
+    try {
+      if (driver === 'b2') {
+        const endpoint = this.getConfigValue(
+          'B2_MEDIA_ENDPOINT',
+          'B2_ENDPOINT',
+        );
+        const region = this.getConfigValue('B2_MEDIA_REGION', 'B2_REGION');
+        const accessKeyId = this.getConfigValue('B2_KEY_ID');
+        const secretAccessKey = this.getConfigValue('B2_APPLICATION_KEY');
 
-      this.bucket = this.config.getOrThrow<string>('B2_MEDIA_BUCKET');
-      this.publicBaseUrl =
-        this.config.get<string>('B2_IMAGE_PUBLIC_URL') ?? null;
+        this.bucket = this.getConfigValue('B2_MEDIA_BUCKET', 'B2_BUCKET');
+        this.publicBaseUrl =
+          this.config.get<string>('B2_IMAGE_PUBLIC_URL') ??
+          this.config.get<string>('B2_PUBLIC_URL') ??
+          null;
 
-      this.client = new S3Client({
-        region,
-        endpoint,
-        credentials: { accessKeyId, secretAccessKey },
-        forcePathStyle: true,
-      });
-    } else {
-      const endpoint = this.config.getOrThrow<string>('S3_ENDPOINT');
-      const region = this.config.get<string>('S3_REGION', 'us-east-1');
-      const accessKeyId = this.config.getOrThrow<string>('S3_ACCESS_KEY');
-      const secretAccessKey = this.config.getOrThrow<string>('S3_SECRET_KEY');
-      const forcePathStyle =
-        this.config.get<string>('S3_FORCE_PATH_STYLE', 'true') === 'true';
+        this.client = new S3Client({
+          region,
+          endpoint,
+          credentials: { accessKeyId, secretAccessKey },
+          forcePathStyle: true,
+        });
+      } else {
+        const endpoint = this.getConfigValue('S3_ENDPOINT');
+        const region = this.getConfigValue('S3_REGION', 'us-east-1');
+        const accessKeyId = this.getConfigValue('S3_ACCESS_KEY');
+        const secretAccessKey = this.getConfigValue('S3_SECRET_KEY');
+        const forcePathStyle =
+          this.config.get<string>('S3_FORCE_PATH_STYLE', 'true') === 'true';
 
-      this.bucket = this.config.getOrThrow<string>('S3_BUCKET');
-      this.client = new S3Client({
-        region,
-        endpoint,
-        credentials: { accessKeyId, secretAccessKey },
-        forcePathStyle,
-      });
+        this.bucket = this.getConfigValue('S3_BUCKET');
+        this.client = new S3Client({
+          region,
+          endpoint,
+          credentials: { accessKeyId, secretAccessKey },
+          forcePathStyle,
+        });
+      }
+
+      this.uploadExpires = parseInt(
+        this.config.get<string>('SIGNED_URL_UPLOAD_EXPIRES', '900'),
+        10,
+      );
+      this.playbackExpires = parseInt(
+        this.config.get<string>('SIGNED_URL_PLAYBACK_EXPIRES', '1800'),
+        10,
+      );
+      this.imageExpires = parseInt(
+        this.config.get<string>('SIGNED_URL_IMAGE_EXPIRES', '31536000'),
+        10,
+      );
+
+      console.log(
+        `   Storage: ${this.driver.toUpperCase()} • bucket: ${this.bucket}`,
+      );
+    } catch (error) {
+      console.warn(
+        `Storage não configurado. Uploads e URLs assinadas permanecerão indisponíveis até o ambiente local estar configurado. ${(error as Error).message}`,
+      );
+      this.client = undefined as unknown as S3Client;
+      this.bucket = 'unconfigured';
+      this.uploadExpires = 900;
+      this.playbackExpires = 1800;
+      this.imageExpires = 31536000;
     }
-
-    this.uploadExpires = parseInt(
-      this.config.get<string>('SIGNED_URL_UPLOAD_EXPIRES', '900'),
-      10,
-    );
-    this.playbackExpires = parseInt(
-      this.config.get<string>('SIGNED_URL_PLAYBACK_EXPIRES', '1800'), // 🆕 subiu de 300 → 1800
-      10,
-    );
-    this.imageExpires = parseInt(
-      this.config.get<string>('SIGNED_URL_IMAGE_EXPIRES', '31536000'),
-      10,
-    );
-
-    console.log(
-      `   Storage: ${this.driver.toUpperCase()} • bucket: ${this.bucket}`,
-    );
   }
 
   getDriver(): StorageDriver {
@@ -90,6 +118,9 @@ export class StorageService implements OnModuleInit {
 
   async getUploadUrl(key: string, contentType: string): Promise<string> {
     if (!key) throw new Error('Key obrigatória');
+    if (!this.client) {
+      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
+    }
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -101,7 +132,10 @@ export class StorageService implements OnModuleInit {
   }
 
   async getPlaybackUrl(key: string): Promise<{ url: string; expiresAt: Date }> {
-    if (!key) throw new Error('Key obrigatória'); // 🆕
+    if (!key) throw new Error('Key obrigatória');
+    if (!this.client) {
+      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
+    }
     const command = new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -116,10 +150,12 @@ export class StorageService implements OnModuleInit {
   }
 
   async getImageUrl(key: string): Promise<string> {
-    if (!key) throw new Error('Key obrigatória'); // 🆕
-    // Se tiver URL pública configurada, usa direto (mais rápido)
+    if (!key) throw new Error('Key obrigatória');
     if (this.publicBaseUrl) {
       return `${this.publicBaseUrl.replace(/\/$/, '')}/${key}`;
+    }
+    if (!this.client) {
+      throw new Error('Storage não configurado. Defina S3/B2 no ambiente.');
     }
     const command = new GetObjectCommand({
       Bucket: this.bucket,
@@ -130,6 +166,7 @@ export class StorageService implements OnModuleInit {
 
   async objectExists(key: string): Promise<boolean> {
     if (!key) return false;
+    if (!this.client) return false;
     try {
       await this.client.send(
         new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
@@ -142,6 +179,7 @@ export class StorageService implements OnModuleInit {
 
   async deleteObject(key: string): Promise<void> {
     if (!key) return;
+    if (!this.client) return;
     await this.client.send(
       new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
     );

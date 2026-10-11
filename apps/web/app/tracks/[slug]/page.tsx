@@ -147,16 +147,16 @@ export default function TrackPage() {
                   </Link>
                 </div>
               )}
-                            {(track as any).isrc && (
+                            {track.isrc && (
                 <div>
                   <strong className="text-text">ISRC:</strong>{' '}
-                  <span className="font-mono">{(track as any).isrc}</span>
+                  <span className="font-mono">{track.isrc}</span>
                 </div>
               )}
-              {(track as any).upc && (
+              {track.upc && (
                 <div>
                   <strong className="text-text">UPC:</strong>{' '}
-                  <span className="font-mono">{(track as any).upc}</span>
+                  <span className="font-mono">{track.upc}</span>
                 </div>
               )}
             </div>

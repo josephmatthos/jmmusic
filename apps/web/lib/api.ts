@@ -39,17 +39,29 @@ export interface Track {
   mood: string | null;
   durationSeconds: number | null;
   status: 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
+  isrc: string | null;
+  upc: string | null;
   createdAt: string;
   artist: Artist | null;
   album: Album | null;
 }
 
+export type UserRole = 'CUSTOMER' | 'ADMIN';
+
 export interface User {
   id: string;
   email: string;
   name: string;
-  role: 'CUSTOMER' | 'ADMIN';
-  emailVerified?: string | null; // 🆕
+  role: UserRole;
+  emailVerified?: string | null;
+}
+
+export interface AdminUser extends User {
+  createdAt: string;
+  _count?: {
+    subscriptions: number;
+    rentals: number;
+  };
 }
 
 export interface AuthResponse {
@@ -587,7 +599,7 @@ export const api = {
 
   // Users
   adminListUsers: (
-    params: { q?: string; role?: string; page?: number; limit?: number } = {},
+    params: { q?: string; role?: UserRole | string; page?: number; limit?: number } = {},
   ) => {
     const search = new URLSearchParams();
     if (params.q) search.set('q', params.q);
@@ -595,13 +607,13 @@ export const api = {
     if (params.page) search.set('page', String(params.page));
     if (params.limit) search.set('limit', String(params.limit));
     const qs = search.toString();
-    return request<Paginated<any>>(`/admin/users${qs ? `?${qs}` : ''}`, {
+    return request<Paginated<AdminUser>>(`/admin/users${qs ? `?${qs}` : ''}`, {
       auth: true,
     });
   },
 
-  adminUpdateUserRole: (userId: string, role: 'CUSTOMER' | 'ADMIN') =>
-    request<{ id: string; email: string; name: string; role: string }>(
+  adminUpdateUserRole: (userId: string, role: UserRole) =>
+    request<{ id: string; email: string; name: string; role: UserRole }>(
       `/admin/users/${userId}/role`,
       { method: 'PATCH', body: { role }, auth: true },
     ),

@@ -1,5 +1,18 @@
 {
-  "dependencies": {
-    "@nestjs/schedule": "^12.0.2"
+  "name": "jmmusic",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"npm --prefix apps/api run dev\" \"npm --prefix apps/web run dev\"",
+    "build": "npm --prefix apps/api run build && npm --prefix apps/web run build",
+    "dev:api": "npm --prefix apps/api run dev",
+    "dev:web": "npm --prefix apps/web run dev",
+    "lint": "npm --prefix apps/web run lint",
+    "test": "npm --prefix apps/api run test -- --runInBand"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
   }
 }

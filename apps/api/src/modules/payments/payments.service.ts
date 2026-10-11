@@ -323,9 +323,9 @@ export class PaymentsService {
     manifest?: string;
   }) {
     const secret = this.config.get<string>('MERCADOPAGO_WEBHOOK_SECRET');
+    const isProduction = this.config.get<string>('NODE_ENV') === 'production';
 
-    // Em produção, exige secret
-    if (this.config.get<string>('NODE_ENV') === 'production' && !secret) {
+    if (isProduction && !secret) {
       throw new Error('MERCADOPAGO_WEBHOOK_SECRET é obrigatório em produção');
     }
 
@@ -340,17 +340,22 @@ export class PaymentsService {
       throw new BadRequestException('Assinatura do webhook ausente');
     }
 
+    const v1 = sig.xSignature
+      .split(',')
+      .map((part) => part.trim())
+      .map((part) => part.split('='))
+      .find(([key]) => key?.trim() === 'v1')?.[1]
+      ?.trim();
+
+    if (!v1 || !sig.manifest.trim()) {
+      throw new BadRequestException('Manifest do webhook inválido');
+    }
+
     const expected = createHmac('sha256', secret)
       .update(sig.manifest)
       .digest('hex');
 
-    const v1 = sig.xSignature
-      .split(',')
-      .map((p) => p.split('='))
-      .find(([k]) => k?.trim() === 'v1')?.[1]
-      ?.trim();
-
-    if (!v1 || v1 !== expected) {
+    if (v1 !== expected) {
       this.logger.error('Assinatura do webhook inválida');
       throw new BadRequestException('Assinatura inválida');
     }

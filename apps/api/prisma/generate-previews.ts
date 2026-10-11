@@ -40,7 +40,8 @@ async function downloadFromB2(key: string, destPath: string): Promise<void> {
   if (!res.Body) throw new Error('Body vazio');
 
   const writeStream = createWriteStream(destPath);
-  await pipeline(res.Body as any, writeStream);
+  const body = res.Body as NodeJS.ReadableStream;
+  await pipeline(body, writeStream);
 }
 
 // ----------------------------------------------------------

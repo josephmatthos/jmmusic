@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api } from '@/lib/api';
+import { api, type AdminUser, type UserRole } from '@/lib/api';
 import { formatDate } from '@/lib/format';
 
 export default function AdminUsersPage() {
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
   const [q, setQ] = useState('');
   const [role, setRole] = useState('');
   const [page, setPage] = useState(1);
@@ -38,7 +38,7 @@ export default function AdminUsersPage() {
     };
   }, [q, role, page]);
 
-  async function handleRoleChange(userId: string, newRole: 'CUSTOMER' | 'ADMIN') {
+  async function handleRoleChange(userId: string, newRole: UserRole) {
     setUpdating(userId);
     try {
       await api.adminUpdateUserRole(userId, newRole);
@@ -134,9 +134,12 @@ export default function AdminUsersPage() {
                     <td className="px-4 py-3 text-right">
                       <select
                         value={u.role}
-                        onChange={(e) =>
-                          handleRoleChange(u.id, e.target.value as any)
-                        }
+                        onChange={(e) => {
+                          const nextRole = e.target.value;
+                          if (nextRole === 'CUSTOMER' || nextRole === 'ADMIN') {
+                            void handleRoleChange(u.id, nextRole);
+                          }
+                        }}
                         disabled={updating === u.id}
                         className="text-xs bg-[#0f141a] border border-line rounded px-2 py-1 disabled:opacity-50"
                       >

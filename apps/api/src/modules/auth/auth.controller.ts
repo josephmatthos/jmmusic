@@ -140,7 +140,7 @@ export class AuthController {
       httpOnly: true,
       secure: isProd,
       sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
-      path: '/v1/auth',
+      path: '/',
     };
   }
 }
