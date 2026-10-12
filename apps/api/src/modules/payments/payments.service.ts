@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  BillingInterval,
   OrderStatus,
   RentalStatus,
   SubscriptionStatus,
@@ -57,16 +58,21 @@ export class PaymentsService {
     const testBuyerEmail = this.config.get<string>('MP_TEST_BUYER_EMAIL');
     const payerEmail = isDev && testBuyerEmail ? testBuyerEmail : user.email;
 
-    const preapproval = await this.mp.createPreapproval({
-      reason: `JM Music — ${plan.name}`,
-      externalReference,
-      payerEmail,
-      amountCents: plan.priceCents,
-      currency: plan.currency,
-      intervalUnit: plan.intervalUnit as 'month' | 'year',
-      intervalCount: plan.intervalCount,
-      backUrl: `${appUrl}/checkout/success`,
-    });
+    // O MP aceita apenas 'month' e 'year' como string.
+// O enum BillingInterval tem MONTH e YEAR em uppercase.
+const mpIntervalUnit: 'month' | 'year' =
+  plan.intervalUnit === BillingInterval.YEAR ? 'year' : 'month';
+
+const preapproval = await this.mp.createPreapproval({
+  reason: `JM Music — ${plan.name}`,
+  externalReference,
+  payerEmail,
+  amountCents: plan.priceCents,
+  currency: plan.currency,
+  intervalUnit: mpIntervalUnit,
+  intervalCount: plan.intervalCount,
+  backUrl: `${appUrl}/checkout/success`,
+});
 
     const initPoint =
       preapproval.init_point ?? preapproval.sandbox_init_point ?? null;

@@ -51,6 +51,11 @@ enum ProductType {
   SUBSCRIPTION
 }
 
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+
 // ============================================================
 // USERS + AUTH
 // ============================================================
@@ -170,7 +175,7 @@ model Plan {
   name           String   @unique
   priceCents     Int      @map("price_cents")
   currency       String   @default("BRL") @db.Char(3)
-  intervalUnit   String   @map("interval_unit")
+  intervalUnit   BillingInterval @map("interval_unit")
   intervalCount  Int      @default(1) @map("interval_count")
   active         Boolean  @default(true)
   externalPlanId String?  @map("external_plan_id")
