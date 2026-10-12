@@ -9,3 +9,9 @@ coverage/
 .vscode/
 .idea/
 prisma/migrations/dev.db*
+
+# Artefatos gerados pelo tsc dentro de prisma/
+apps/api/prisma/**/*.js
+apps/api/prisma/**/*.js.map
+apps/api/prisma/**/*.d.ts
+!apps/api/prisma/**/*.config.js
